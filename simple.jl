@@ -1,3 +1,6 @@
+using Random
+using Distributions
+
 rng = MersenneTwister(1234);
 
 T = 200;
@@ -43,38 +46,12 @@ K = [100 1000 10000];
 Km = [3 3 3];
 N_th = [10 100 1000];
 
-function = resampstr(p)
-
-    [m,n]=size(p);
-    mn=m.*n;
-    pn=p./sum(p(:)).*mn;
-    fpn=floor(pn);
-    s=zeros(m,n);
-    r=rand(1,mn);
-    k=0;
-    c=0;
-    for i=1:mn
-        c=c+pn(i);
-        if c>=1
-            a=floor(c);
-            c=c-a;
-            s(k+[1:a])=i;
-            k=k+a;
-        end
-        if k<mn && c>=r(k+1)
-            c=c-1;
-            k=k+1;
-            s(k)=i;
-        end
-    end
-end
-
-function resampleSystematic( w )
+function resample_systematic( w )
     N = length(w);
     Q = cumsum(w);
     T = collect(range(0, stop = 1 - 1 / N, length = N)) .+ rand(1) / N;
     append!(T, 1);
-    ix = zeros(1, N);
+    ix = zeros(Int64, (1, N));
     i=1;
     j=1;
     while (i <= N)
@@ -86,6 +63,26 @@ function resampleSystematic( w )
         end
     end
     ix;
+end
+
+function resample_stratified( weights )
+
+    N = length(weights)
+    # make N subdivisions, and chose a random position within each one
+    positions =  (rand(N) + collect(range(0, N - 1, length = N))) / N
+
+    indexes = zeros(Int64, N)
+    cumulative_sum = cumsum(weights)
+    i, j = 1, 1
+    while i <= N
+        if positions[i] < cumulative_sum[j]
+            indexes[i] = j
+            i += 1
+        else
+            j += 1
+        end
+    end
+    return indexes
 end
 
 # function [ log_W, x_pf_t, log_w_t ] = pf( N, f, g, u, y, Q, R, nx)
