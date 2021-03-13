@@ -1,13 +1,22 @@
+# This should *not* be needed
+
+using Pkg
+pkg"activate ."
+
+# The rest is needed
+
 using Random
 using Distributions
+using Gadfly
+using LinearAlgebra
 
 rng = MersenneTwister(1234);
 
 T = 200;
 a_th = 0.4;
 u = rand(Normal(0.0, 1.0), 1, T);
-Q = 1;
-R = 1;
+Q = 1.0;
+R = 1.0;
 x = zeros(T + 1, 1);
 y = zeros(1, T);
 for t = 1:T
@@ -20,7 +29,7 @@ y = y[:,1:T]';
 u = u[:,1:T]';
 
 function f_g(x,u,k)
-    abs(x).^k + u;
+    map(abs, x_pf[:, a, t-1]).^a_th .+ u[t-1, :]
 end
 
 function g(x,u)
@@ -85,29 +94,26 @@ function resample_stratified( weights )
     return indexes
 end
 
-# function [ log_W, x_pf_t, log_w_t ] = pf( N, f, g, u, y, Q, R, nx)
 function pf( N, f, g, u, y, Q, R, nx)
 
     T = length(u);
     log_w = zeros(T,N);
     x_pf = zeros(nx,N,T);
 
-    Q_chol = chol(Q);
+    Q_chol = cholesky(Q);
 
     for t = 1:T
         if t >= 2
-            a = systematic_resampling(wn,N);
-            x_pf(:,:,t) = f(x_pf(:,a,t-1),u(t-1,:)) + Q_chol*randn(nx,N);
+            a = resample_stratified(wn);
+            x_pf[:, :, t] = f(x_pf[:, a, t-1], u[t-1, :]) + Q_chol.U * rand(Normal(0.0, 1.0), nx, M)
         end
-        log_w(t,:) = mvnpdf_log(g(x_pf(:,:,t),u(t,:))',y(t,:),R)';
-        wn = exp(log_w(t,:) - max(log_w(t,:)));
-        wn = wn/sum(wn);
+        log_w[t, :] = logpdf(MvNormal(y[t, :], R), g(x_pf[:,:,t], u[t,:]));
+        wn = map(x -> exp(x), log_w[t, :] .- maximum(log_w[t, :]));
+        wn = wn / sum(wn);
     end
 
-x_pf_t = x_pf(:,:,T);
-log_w_t = log_w(T,:);
-
-log_W = sum(log(1/N*sum(exp(log_w),2)));
+    log_W = sum(log(1 / N * sum(exp(log_w), 2)));
+    return log_W
 
 end
 
