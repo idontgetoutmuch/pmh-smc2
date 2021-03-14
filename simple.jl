@@ -1,9 +1,5 @@
-# This should *not* be needed
-
 using Pkg
 pkg"activate ."
-
-# The rest is needed
 
 using Random
 using Distributions
@@ -35,6 +31,82 @@ end
 function g(x,u)
     x;
 end
+
+rng = MersenneTwister(1234);
+
+T = 500;
+
+deltaT = 0.01;
+g  = 9.81;
+
+qc1 = 0.0001;
+
+bigQ = [ qc1 * deltaT^3 / 3 qc1 * deltaT^2 / 2;
+         qc1 * deltaT^2 / 2       qc1 * deltaT
+         ];
+
+# bigR  = [0.0001];
+bigR  = [0.01];
+
+# x = zeros(T, 2);
+# y = zeros(T, 1);
+
+# for t = 2:T
+#     x1 = x[t - 1, 1] + x[t - 1, 2] * deltaT;
+#     x2 = x[t - 1, 2] - g * sin(x[t - 1, 1]) * deltaT;
+#     eta = rand(MvNormal(zeros(2), bigQ));
+#     xNew = [x1, x2] .+ eta;
+#     epsilon = rand(MvNormal(zeros(1), bigR));
+#     yNew = sin(xNew[1]) .+ epsilon
+#     x[t, :] = xNew;
+#     y[t, :] = yNew;
+# end
+
+x = zeros(T + 1, 2);
+y = zeros(T,     1);
+
+x[1, :] = [0.01 0];
+
+for t = 2:T+1
+    epsilon = rand(MvNormal(zeros(1), bigR));
+    y[t - 1, :] = sin(x[t- 1, 1]) .+ epsilon
+    x1 = x[t - 1, 1] + x[t - 1, 2] * deltaT;
+    x2 = x[t - 1, 2] - g * sin(x[t - 1, 1]) * deltaT;
+    eta = rand(MvNormal(zeros(2), bigQ));
+    xNew = [x1, x2] .+ eta;
+    x[t, :] = xNew;
+end
+
+plot(layer(y = x[1:T,1], Geom.line, Theme(default_color=color("red"))), layer(y = y[1:T,1], Geom.point))
+
+function ff(x, g)
+    x1 = x[1] + x[2] * deltaT;
+    x2 = x[2] - g * sin(x[1]) * deltaT;
+    [x1, x2];
+end
+
+function f_g(x, k)
+    map(y -> ff(y, k), x)
+end
+
+# > pendulumSample :: MonadRandom m =>
+# >                   Sym 2 ->
+# >                   Sym 1 ->
+# >                   PendulumState ->
+# >                   m (Maybe ((PendulumState, PendulumObs), PendulumState))
+# > pendulumSample bigQ bigR xPrev = do
+# >   let x1Prev = fst $ headTail xPrev
+# >       x2Prev = fst $ headTail $ snd $ headTail xPrev
+# >   eta <- sample $ rvar (MultivariateNormal 0.0 bigQ)
+# >   let x1= x1Prev + x2Prev * deltaT
+# >       x2 = x2Prev - g * (sin x1Prev) * deltaT
+# >       xNew = vector [x1, x2] + eta
+# >       x1New = fst $ headTail xNew
+# >   epsilon <-  sample $ rvar (MultivariateNormal 0.0 bigR)
+# >   let yNew = vector [sin x1New] + epsilon
+# >   return $ Just ((xNew, yNew), xNew)
+
+
 
 nx = 1;
 
