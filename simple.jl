@@ -8,32 +8,6 @@ using LinearAlgebra
 
 rng = MersenneTwister(1234);
 
-T = 200;
-a_th = 0.4;
-u = rand(Normal(0.0, 1.0), 1, T);
-Q = 1.0;
-R = 1.0;
-x = zeros(T + 1, 1);
-y = zeros(1, T);
-for t = 1:T
-    if t <= T
-        x[t+1] = abs(x[t])^a_th + u[t] + sqrt(Q) * rand(Normal(0.0, 1.0), 1)[1];
-    end
-    y[t] = x[t] + sqrt(R) * rand(Normal(0.0, 1.0), 1)[1];
-end
-y = y[:,1:T]';
-u = u[:,1:T]';
-
-function f_g(x,u,k)
-    map(abs, x_pf[:, a, t-1]).^a_th .+ u[t-1, :]
-end
-
-function g(x,u)
-    x;
-end
-
-rng = MersenneTwister(1234);
-
 T = 500;
 
 deltaT = 0.01;
@@ -45,22 +19,7 @@ bigQ = [ qc1 * deltaT^3 / 3 qc1 * deltaT^2 / 2;
          qc1 * deltaT^2 / 2       qc1 * deltaT
          ];
 
-# bigR  = [0.0001];
 bigR  = [0.01];
-
-# x = zeros(T, 2);
-# y = zeros(T, 1);
-
-# for t = 2:T
-#     x1 = x[t - 1, 1] + x[t - 1, 2] * deltaT;
-#     x2 = x[t - 1, 2] - g * sin(x[t - 1, 1]) * deltaT;
-#     eta = rand(MvNormal(zeros(2), bigQ));
-#     xNew = [x1, x2] .+ eta;
-#     epsilon = rand(MvNormal(zeros(1), bigR));
-#     yNew = sin(xNew[1]) .+ epsilon
-#     x[t, :] = xNew;
-#     y[t, :] = yNew;
-# end
 
 x = zeros(T + 1, 2);
 y = zeros(T,     1);
@@ -86,29 +45,14 @@ function ff(x, g)
 end
 
 function f_g(x, k)
-    map(y -> ff(y, k), x)
+    map(y -> ff(y, k), mapslices(y -> [y], x, dims = 1))
 end
 
-# > pendulumSample :: MonadRandom m =>
-# >                   Sym 2 ->
-# >                   Sym 1 ->
-# >                   PendulumState ->
-# >                   m (Maybe ((PendulumState, PendulumObs), PendulumState))
-# > pendulumSample bigQ bigR xPrev = do
-# >   let x1Prev = fst $ headTail xPrev
-# >       x2Prev = fst $ headTail $ snd $ headTail xPrev
-# >   eta <- sample $ rvar (MultivariateNormal 0.0 bigQ)
-# >   let x1= x1Prev + x2Prev * deltaT
-# >       x2 = x2Prev - g * (sin x1Prev) * deltaT
-# >       xNew = vector [x1, x2] + eta
-# >       x1New = fst $ headTail xNew
-# >   epsilon <-  sample $ rvar (MultivariateNormal 0.0 bigR)
-# >   let yNew = vector [sin x1New] + epsilon
-# >   return $ Just ((xNew, yNew), xNew)
+function h(x)
+    map(z -> sin(z[1]), mapslices(y->[y], x, dims=1))
+end
 
-
-
-nx = 1;
+nx = 2;
 
 n_th = 1;
 
@@ -166,26 +110,28 @@ function resample_stratified( weights )
     return indexes
 end
 
-function pf( N, f, g, u, y, Q, R, nx)
+function k(x)
+    f_g(x, g)
+end
 
-    T = length(u);
+function pf(N, f, h, y, Q, R, nx)
+
+    T = length(y)
     log_w = zeros(T,N);
     x_pf = zeros(nx,N,T);
-
-    Q_chol = cholesky(Q);
+    wn = zeros(N);
 
     for t = 1:T
         if t >= 2
             a = resample_stratified(wn);
-            x_pf[:, :, t] = f(x_pf[:, a, t-1], u[t-1, :]) + Q_chol.U * rand(Normal(0.0, 1.0), nx, M)
+            x_pf[:, :, t] = hcat(f(x_pf[:, a, t-1])...) + rand(MvNormal(zeros(nx), Q), N)
         end
-        log_w[t, :] = logpdf(MvNormal(y[t, :], R), g(x_pf[:,:,t], u[t,:]));
+        log_w[t, :] = logpdf(MvNormal(y[t, :], R), h(x_pf[:,:,t]));
         wn = map(x -> exp(x), log_w[t, :] .- maximum(log_w[t, :]));
         wn = wn / sum(wn);
     end
 
-    log_W = sum(log(1 / N * sum(exp(log_w), 2)));
-    return log_W
+    return(x_pf, log_w)
 
 end
 
