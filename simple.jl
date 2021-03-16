@@ -6,6 +6,7 @@ using Distributions
 using Gadfly
 using LinearAlgebra
 
+# FIXME: This doesn't seem to give reproducibility
 rng = MersenneTwister(1234);
 
 T = 500;
@@ -114,11 +115,12 @@ function k(x)
     f_g(x, g)
 end
 
-function pf(N, f, h, y, Q, R, nx)
+function pf(inits, N, f, h, y, Q, R, nx)
 
     T = length(y)
     log_w = zeros(T,N);
     x_pf = zeros(nx,N,T);
+    x_pf[:,:,1] = inits;
     wn = zeros(N);
 
     for t = 1:T
@@ -131,9 +133,21 @@ function pf(N, f, h, y, Q, R, nx)
         wn = wn / sum(wn);
     end
 
-    return(x_pf, log_w)
+    log_W = sum(map(log, map(x -> x / N, sum(map(exp, bar[1:10, :]), dims=2))));
+
+    return(x_pf, log_w, log_W)
 
 end
+
+N = 50;
+
+inits = zeros(nx, N);
+inits[1, :] .= 0.01;
+inits[2, :] .= 0.00;
+
+(foo, bar, baz) = pf(inits, N, k, h, y, bigQ, bigR, nx);
+
+plot(layer(y = x[1:T,1], Geom.line, Theme(default_color=color("red"))), layer(y = map(x -> x / 50, sum(foo[1,:,:],dims=1)), Geom.line))
 
 function pmh( K, N, n_th, u, y, f_g, g, nx, prior_sample, prior_pdf, Q, R)
 
