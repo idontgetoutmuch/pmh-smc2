@@ -57,14 +57,12 @@ nx = 2;
 
 n_th = 1;
 
-# prior_pdf = @(theta) mvnpdf(theta,0,1)';
 function prior_pdf(theta)
-    pdf(MvNormal(zeros(length(theta)), I), theta)
+    pdf(MvLogNormal(zeros(length(theta)), Matrix{Float64}(I, length(theta), length(theta))), theta)
 end
 
-# prior_sample = @(n) mvnrnd(zeros(n,1),1)';
 function prior_sample(n)
-    rand(MvNormal(zeros(n), I))
+    rand(MvLogNormal(zeros(n), Matrix{Float64}(I, n, n)))
 end
 
 N = [5 30 80];
@@ -133,7 +131,7 @@ function pf(inits, N, f, h, y, Q, R, nx)
         wn = wn / sum(wn);
     end
 
-    log_W = sum(map(log, map(x -> x / N, sum(map(exp, bar[1:10, :]), dims=2))));
+    log_W = sum(map(log, map(x -> x / N, sum(map(exp, log_w[:, :]), dims=2))));
 
     return(x_pf, log_w, log_W)
 
@@ -149,18 +147,20 @@ inits[2, :] .= 0.00;
 
 plot(layer(y = x[1:T,1], Geom.line, Theme(default_color=color("red"))), layer(y = map(x -> x / 50, sum(foo[1,:,:],dims=1)), Geom.line))
 
-function pmh( K, N, n_th, u, y, f_g, g, nx, prior_sample, prior_pdf, Q, R)
+function pmh( inits, K, N, n_th, u, y, f_g, g, nx, prior_sample, prior_pdf, Q, R)
 
-    theta = zeros(n_th,K+1);
+    theta = zeros(n_th ,K+1);
     log_W = -Inf;
 
-    while log_W==-Inf %Find an initial sample without numerical problems
-        theta(:,1) = prior_sample(1);
-        log_W = pf( N, @(x,u)f_g(x,u,theta(:,1)), g, u, y, Q, R, nx);
+    while log_W == -Inf %Find an initial sample without numerical problems
+        theta[:, 1] = prior_sample(1);
+        # FIXME:
+        log_W = pf(inits, N, (x) -> f_g(x, theta[:, 1][1]), g, y, Q, R, nx)[3];
     end
 
     for k = 1:K
-        theta_prop = theta(:,k) + 0.1*randn(n_th,1);
+        theta_prop = map(exp, map(log, theta[:, 1]) + rand(MvNormal(zeros(n_th), 1), 1)[1, :]);
+
         log_W_prop = pf( N, @(x,u)f_g(x,u,theta_prop), g, u, y, Q, R, nx);
         dm = rand;
         mh_ratio = exp(log_W_prop-log_W)*prior_pdf(theta_prop)/prior_pdf(theta(:,k));
