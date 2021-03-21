@@ -147,41 +147,56 @@ inits[2, :] .= 0.00;
 
 plot(layer(y = x[1:T,1], Geom.line, Theme(default_color=color("red"))), layer(y = map(x -> x / 50, sum(foo[1,:,:],dims=1)), Geom.line))
 
-function pmh( inits, K, N, n_th, u, y, f_g, g, nx, prior_sample, prior_pdf, Q, R)
+
+function pmh(inits, K, N, n_th, y, f_g, g, nx, prior_sample, prior_pdf, Q, R)
 
     theta = zeros(n_th ,K+1);
     log_W = -Inf;
+    # FIXME:
+    x_pfs = zeros(nx,N,T, K);
 
-    while log_W == -Inf %Find an initial sample without numerical problems
-        theta[:, 1] = prior_sample(1);
+    while log_W == -Inf # Find an initial sample without numerical problems
+        theta[:, 1] = 9 .+ prior_sample(1);
         # FIXME:
         log_W = pf(inits, N, (x) -> f_g(x, theta[:, 1][1]), g, y, Q, R, nx)[3];
     end
 
     for k = 1:K
-        theta_prop = map(exp, map(log, theta[:, 1]) + rand(MvNormal(zeros(n_th), 1), 1)[1, :]);
+        theta_prop = map(exp, map(log, theta[:, k]) + 0.1 * rand(MvNormal(zeros(n_th), 1), 1)[1, :]);
+        # log_W_prop = pf(inits, N, (x) -> f_g(x, theta_prop[1]), g, y, Q, R, nx)[3];
+        (a, b, c) = pf(inits, N, (x) -> f_g(x, theta_prop[1]), g, y, Q, R, nx);
+        log_W_prop = c;
+        x_pfs[:, :, :, k] = a;
+        mh_ratio = exp(log_W_prop - log_W) * prior_pdf(theta_prop) / prior_pdf(theta[:,k]);
 
-        log_W_prop = pf( N, @(x,u)f_g(x,u,theta_prop), g, u, y, Q, R, nx);
-        dm = rand;
-        mh_ratio = exp(log_W_prop-log_W)*prior_pdf(theta_prop)/prior_pdf(theta(:,k));
+        # display([theta[:, k], theta_prop, log_W, log_W_prop, mh_ratio]);
+
         if isnan(mh_ratio)
             alpha = 0;
         else
             alpha = min(1,mh_ratio);
         end
+
+        dm = rand();
         if dm < alpha
-            theta(:,k+1) = theta_prop;
+            theta[:, k+1] = theta_prop;
             log_W = log_W_prop;
             new = true;
         else
-            theta(:,k+1) = theta(:,k);
+            theta[:, k+1] = theta[:, k];
             new = false;
         end
-        if new == true; display(['PMH Sampling ', num2str(k), ': Proposal accepted!']); else
-            display(['PMH Sampling ', num2str(k), ': Proposal rejected']);
-        end
+
+        # if new == true;
+        #     display(["PMH Sampling ", k, ": Proposal accepted!"]);
+        # else
+        #     display(["PMH Sampling ", k, ": Proposal rejected"]);
+        # end
     end
+    return (x_pfs, theta);
 end
+
+plot(layer(y = x[1:T,1], Geom.line, Theme(default_color=color("red"))), layer(y = map(x -> x / 50, sum(fuu[1,:,:,1],dims=1)), Geom.line), layer(y = map(x -> x / 50, sum(fuu[1,:,:,50],dims=1)), Geom.line, Theme(default_color=color("green"))))
 
 
 # for i = 1:3
