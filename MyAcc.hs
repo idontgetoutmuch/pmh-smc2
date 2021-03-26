@@ -1,18 +1,25 @@
 {-# LANGUAGE TypeOperators    #-}
 {-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE QuasiQuotes      #-}
+{-# LANGUAGE TemplateHaskell  #-}
 
-import           Data.Array.Accelerate                as A hiding ( (^), Floating, (!!) )
-import           Data.Array.Accelerate.LLVM.Native    as CPU
+import           Data.Array.Accelerate                       as A   hiding ( (^), Floating, (!!), V2, V3 )
+import           Data.Array.Accelerate.LLVM.Native           as CPU
 import           Data.Array.Accelerate.System.Random.MWC
 import qualified Data.Array.Accelerate.Numeric.LinearAlgebra as ALA
+import qualified Linear                                      as L
+import           Data.Array.Accelerate.Linear                       hiding ( trace, (><) )
+import           Data.Array.Accelerate.Control.Lens                 hiding ( use )
 import qualified Numeric.LinearAlgebra as LA
 import           Numeric.LinearAlgebra ( (><), (#>) )
-import           Data.Random                          as R hiding ( uniform, normal )
+import           Data.Random                                 as T   hiding ( uniform, normal )
 import           Control.Monad.State
-import qualified Data.Random.Distribution.Exponential as R
-import qualified Data.Random.Distribution.Poisson     as R
-import qualified Data.Random.Distribution.Normal      as R
+import qualified Data.Random.Distribution.Exponential        as T
+import qualified Data.Random.Distribution.Poisson            as T
+import qualified Data.Random.Distribution.Normal             as T
 
+import qualified Language.R as S
+import Language.R.QQ
 
 dotp :: Acc (Vector Float) -> Acc (Vector Float) -> Acc (Scalar Float)
 dotp xs ys = A.fold (+) 0 (A.zipWith (*) xs ys)
@@ -21,18 +28,18 @@ exponential
     :: (Distribution StdUniform e, Floating e, Shape sh, Elt e)
     => e
     -> sh :~> e
-exponential beta _sh gen = sampleFrom gen (R.exponential beta)
+exponential beta _sh gen = sampleFrom gen (T.exponential beta)
 
-normal :: (Distribution R.Normal e, Shape sh, Elt e)
+normal :: (Distribution T.Normal e, Shape sh, Elt e)
        => e -> e
        -> sh :~> e
-normal mu sigma _sh gen = sampleFrom gen (R.normal mu sigma)
+normal mu sigma _sh gen = sampleFrom gen (T.normal mu sigma)
 
 poisson
-    :: (Distribution (R.Poisson b) a, Shape sh, Elt a)
+    :: (Distribution (T.Poisson b) a, Shape sh, Elt a)
     => b
     -> sh :~> a
-poisson lambda _sh gen = sampleFrom gen (R.poisson lambda)
+poisson lambda _sh gen = sampleFrom gen (T.poisson lambda)
 
 bigT = 500
 
@@ -62,8 +69,8 @@ biNormal :: RandomSource m s =>
             s ->
             m (Acc (Vector Double))
 biNormal mu sigma gen = do
-  s1 <- sampleFrom gen (R.normal (0.0 :: Double) 1.0)
-  s2 <- sampleFrom gen (R.normal (0.0 :: Double) 1.0)
+  s1 <- sampleFrom gen (T.normal (0.0 :: Double) 1.0)
+  s2 <- sampleFrom gen (T.normal (0.0 :: Double) 1.0)
   return $ A.zipWith (+) (use mu)
                          (bigA ALA.#> (use $ fromList (Z:.2) [s1, s2]))
 
@@ -83,9 +90,15 @@ biNormal mu sigma gen = do
             [rho12 / n1, (sigma1 - l1) / n1, rho12 / n2, (sigma1 - l2) / n2]
     bigA = (use bigU) ALA.<> lSqrt
 
-a = qc1 * deltaT^3 / 3
-b = qc1 * deltaT^2 / 2
-c = qc1 * deltaT
+f :: V3 Double -> V3 Double -> V3 Double
+f prev _ = V3 x1New x2New yNew
+  where
+    x1Prev = prev ^. L._x
+    x2Prev = prev ^. L._y
+    yPrev  = prev ^. L._z
+    x1New  = x1Prev + x2Prev * deltaT
+    x2New  = x2Prev - g * sin(x1Prev) * deltaT
+    yNew   = sin(x1Prev)
 
 test :: IO ()
 test = do
@@ -94,11 +107,25 @@ test = do
   print $ run bar
   return ()
 
-normalMultivariate :: LA.Vector Double -> LA.Herm Double -> R.RVarT m (LA.Vector Double)
-normalMultivariate mu bigSigma = do
-  z <- replicateM (LA.size mu) (rvarT R.StdNormal)
-  return $ mu + bigA LA.#> (LA.fromList z)
+oneStepH98 :: Double -> V2 (V2 Double) -> V2 (V2 Double)
+oneStepH98 hh prev = V2 qNew pNew
   where
-    (vals, bigU) = LA.eigSH bigSigma
-    lSqrt = LA.diag $ LA.cmap sqrt vals
-    bigA = bigU LA.<> lSqrt
+    h2 = hh / 2
+    hhs = V2 hh hh
+    hh2s = V2 h2 h2
+    pp2 = psPrev - hh2s * nablaQ' qsPrev
+    qNew = qsPrev + hhs * nablaP' pp2
+    pNew = pp2 - hh2s * nablaQ' qNew
+    qsPrev = prev ^. L._x
+    psPrev = prev ^. L._y
+    nablaQ' qs = V2 (qq1 / r) (qq2 / r)
+      where
+        qq1 = qs ^. L._x
+        qq2 = qs ^. L._y
+        r   = (qq1 ^ 2 + qq2 ^ 2) ** (3/2)
+    nablaP' ps = ps
+
+test1 :: IO ()
+test1 = S.runRegion $ do
+  _ <- [r| plot(1:10, c(3, 1, 5, 2, 3, 8, 4, 7, 6, 9), type = "l") |]
+  return ()

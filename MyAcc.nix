@@ -46,6 +46,8 @@ myHaskellPackageOverlay = self: super: {
         in
           self.haskell.lib.addBuildDepends (super.haskell.lib.dontHaddock (super.haskell.lib.dontCheck bls)) [ super.openblas ];
 
+      inline-r = super.haskell.lib.dontCheck hsuper.inline-r;
+
     };
   };
 };
@@ -59,8 +61,9 @@ let
   inherit (nixpkgs) pkgs;
 
   f = { mkDerivation, accelerate, accelerate-llvm-native,
-        accelerate-blas, mwc-random-accelerate,
-        base, stdenv, hmatrix, random-fu
+        accelerate-blas, mwc-random-accelerate, lens-accelerate,
+        linear-accelerate,
+        base, stdenv, hmatrix, random-fu, inline-r
       }:
       mkDerivation {
         pname = "lorri-test";
@@ -73,9 +76,17 @@ let
           accelerate-llvm-native
           accelerate-blas
           mwc-random-accelerate
+          lens-accelerate
+          linear-accelerate
           hmatrix
           random-fu
+          inline-r
           base
+        ];
+        executableSystemDepends = [
+          pkgs.R
+          pkgs.rPackages.dplyr
+          pkgs.rPackages.ggplot2
         ];
         homepage = "https://github.com/idontgetoutmuch/whatever";
         description = "Whatever";
