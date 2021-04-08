@@ -72,6 +72,48 @@ simulatedDataPrim g deltaT bigT stateGen =
       let y = sin x1New + (epsilon LA.! 0)
       _ <- write ma (i :. 2) y
       pure (x1New, x2New, y)
+      ,
+resample_stratified :: forall g m r . (StatefulGen g m, PrimMonad m, Manifest r Ix1 Double) =>
+                       Array r Ix1 Double -> g -> m (Array P Int Int)
+resample_stratified weights stateGen = indices stateGen
+
+  where
+
+    bigN = elemsCount weights
+
+    cumulative_sum :: m (Array P Int Double)
+    cumulative_sum = createArrayS_ (Sz bigN) $
+      (\ma -> foldM_ (f ma) 0.0 (0 ..: bigN))
+      where
+        f ma s i = do
+          let v = weights!i
+              t = s + v
+          _ <- write ma i t
+          return t
+
+    -- Make N subdivisions, and chose a random position within each one
+    positions :: g -> m (Array P Int Double)
+    positions stateGen = createArrayS_ (Sz bigN) $
+      \ma -> foldlM_ (f ma) 0.0 (0 ..: bigN)
+      where
+        f ma _ i = do
+          epsilon <- sampleFrom stateGen (Uniform 0.0 1.0)
+          let t = (epsilon + fromIntegral i) / (fromIntegral bigN)
+          _ <- write ma i t
+          return t
+
+    indices stateGen = do
+      ps <- positions stateGen
+      cs <- cumulative_sum
+      let f ma s i = do
+            let go j =
+                  if (ps!i) < (cs!j)
+                  then do
+                    _ <- write ma i j
+                    return j
+                  else go (j + 1)
+            go s
+      createArrayS_ (Sz bigN) $ \ma -> foldlM_ (f ma) 0 (0 ..: bigN)
 
 ts :: [Double]
 ts = Prelude.map Prelude.fromIntegral [0 .. bigT]
