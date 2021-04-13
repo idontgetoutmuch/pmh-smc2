@@ -34,6 +34,7 @@ import Control.Monad.Primitive
 
 bigT = 500
 
+g, deltaT :: Double
 deltaT = 0.01
 g  = 9.81
 
@@ -72,16 +73,19 @@ simulatedDataPrim g deltaT bigT stateGen =
       let y = sin x1New + (epsilon LA.! 0)
       _ <- write ma (i :. 2) y
       pure (x1New, x2New, y)
-      ,
-resample_stratified :: forall g m r . (StatefulGen g m, PrimMonad m, Manifest r Ix1 Double) =>
-                       Array r Ix1 Double -> g -> m (Array P Int Int)
-resample_stratified weights stateGen = indices stateGen
+
+
+-- See https://xianblog.wordpress.com/tag/stratified-resampling/
+resample_stratified'
+  :: forall g m . (PrimMonad m, StatefulGen g m, MonadReader g m) =>
+     Array P Int Double -> m (Array P Int Int)
+resample_stratified' weights = indices
 
   where
 
     bigN = elemsCount weights
 
-    cumulative_sum :: m (Array P Int Double)
+    cumulative_sum :: PrimMonad m => m (Array P Int Double)
     cumulative_sum = createArrayS_ (Sz bigN) $
       (\ma -> foldM_ (f ma) 0.0 (0 ..: bigN))
       where
@@ -92,18 +96,19 @@ resample_stratified weights stateGen = indices stateGen
           return t
 
     -- Make N subdivisions, and chose a random position within each one
-    positions :: g -> m (Array P Int Double)
-    positions stateGen = createArrayS_ (Sz bigN) $
+    positions :: (StatefulGen g m, PrimMonad m) => m (Array P Int Double)
+    positions = createArrayS_ (Sz bigN) $
       \ma -> foldlM_ (f ma) 0.0 (0 ..: bigN)
       where
         f ma _ i = do
-          epsilon <- sampleFrom stateGen (Uniform 0.0 1.0)
+          epsilon <- sample (Uniform 0.0 1.0)
           let t = (epsilon + fromIntegral i) / (fromIntegral bigN)
           _ <- write ma i t
           return t
 
-    indices stateGen = do
-      ps <- positions stateGen
+    indices :: (StatefulGen g m, PrimMonad m) => m (Array P Int Int)
+    indices = do
+      ps <- positions
       cs <- cumulative_sum
       let f ma s i = do
             let go j =
@@ -114,6 +119,52 @@ resample_stratified weights stateGen = indices stateGen
                   else go (j + 1)
             go s
       createArrayS_ (Sz bigN) $ \ma -> foldlM_ (f ma) 0 (0 ..: bigN)
+
+
+-- pf inits bigN f h y bigQ bigR nx = undefined
+--   where
+--      bigT = elemsCount y
+--      f ma (x_pf, wn) i = undefined
+--        where
+--          a = resample_stratified wn
+--          x_pf = undefined
+
+-- FIXME: Do we want a mutable array?
+pfOneStep :: (PrimMonad m, MonadThrow m, StatefulGen g m, MonadReader g m) =>
+             Array D Ix2 Double -> Array P Int Double -> m (Array DL Ix2 Double)
+pfOneStep x_pf wn = do
+  let bigN = elemsCount wn
+  is <- resample_stratified' wn
+  let y_pf = backpermute' (Sz (2 :. bigN)) (\(i :. j) -> i :. (is!j)) x_pf
+      y1Prev = y_pf !> 0
+      y2Prev = y_pf !> 1
+      y1New  = y1Prev !+! y2Prev .* deltaT
+      y2New  = y2Prev !-! M.map (\x -> g * sin x * deltaT) y1Prev
+  stackSlicesM (Dim 2) [y1New, y2New]
+
+-- function pf(inits, N, f, h, y, Q, R, nx)
+
+--     T = length(y)
+--     log_w = zeros(T,N);
+--     x_pf = zeros(nx,N,T);
+--     x_pf[:,:,1] = inits;
+--     wn = zeros(N);
+
+--     for t = 1:T
+--         if t >= 2
+--             a = resample_stratified(wn);
+--             x_pf[:, :, t] = hcat(f(x_pf[:, a, t-1])...) + rand(MvNormal(zeros(nx), Q), N)
+--         end
+--         log_w[t, :] = logpdf(MvNormal(y[t, :], R), h(x_pf[:,:,t]));
+--         wn = map(x -> exp(x), log_w[t, :] .- maximum(log_w[t, :]));
+--         wn = wn / sum(wn);
+--     end
+
+--     log_W = sum(map(log, map(x -> x / N, sum(map(exp, log_w[:, :]), dims=2))));
+
+--     return(x_pf, log_w, log_W)
+
+-- end
 
 ts :: [Double]
 ts = Prelude.map Prelude.fromIntegral [0 .. bigT]
@@ -181,6 +232,11 @@ plot (figw,figh) specGrid dataPoints =
 
 main :: IO ()
 main = do
+  is :: Array P Ix1 Int <- MWC.create >>= runReaderT (resample_stratified' ((fromList Seq ([0.5] ++ P.replicate 5 0.1)) :: Array P Ix1 Double))
+  print is
+  foo :: Array DL Ix2 Double <- MWC.create >>= runReaderT (pfOneStep (makeArray Seq (Sz (2 :. 5)) (\ (i :. j) -> 5 * fromIntegral i + fromIntegral j) :: Array D Ix2 Double) ((fromList Seq ([0.2, 0.2, 0.2, 0.2, 0.2])) :: Array P Ix1 Double))
+  print foo
   toHtmlFile "bar.hmtl" $ toVegaLite [ dat [], mark Line [], enc [] ]
   toHtmlFile "baz.html" $
     plot (600, 300) (L [pointPlot "time" "angle", linePlot "time" "horizontal displacement"]) (Cols [("time", VL.Numbers ts), ("angle", VL.Numbers ys), ("horizontal displacement", VL.Numbers xs)])
+ 
