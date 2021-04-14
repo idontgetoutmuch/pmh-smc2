@@ -33,6 +33,7 @@ import Control.Monad.Primitive
 
 
 bigT = 500
+bigN = 50
 
 g, deltaT :: Double
 deltaT = 0.01
@@ -74,18 +75,52 @@ simulatedDataPrim g deltaT bigT stateGen =
       _ <- write ma (i :. 2) y
       pure (x1New, x2New, y)
 
+-- FIXME: Also return log weights array
+-- FIXME: Maybe use just map rather than e.g. !+!
+-- FIXME: Generalise with a state update function and an observation function
+pfPrim :: forall g m . (StatefulGen g m, PrimMonad m, MonadReader g m, MonadThrow m) =>
+          Array P Ix2 Double ->
+          Double -> Double -> Ix1 -> Ix1 ->
+          Array P Ix1 Double -> m (Array P Ix3 Double)
+pfPrim inits g deltaT bigT bigN ys = do
+  let initWeights = fromList Seq $ Prelude.replicate bigN (1.0 / fromIntegral bigN)
+  createArrayS_ (Sz (bigT :> bigN :. 2)) $
+    \ma -> foldlM_ (f ma) (inits, initWeights) (0 ..: bigT)
+  where
+    f ma (aOld, wOld) i = do
+      js <- resample_stratified' wOld
+      let z_pf = computeAs P $
+                 backpermute' (Sz (2 :. bigN)) (\(i :. j) -> i :. (js!j)) aOld
+      etas <- replicateM bigN $ sample (Normal (LA.vector [0.0, 0.0]) bigQH)
+      let eta1s = fromList Seq $ Prelude.map (LA.! 0) etas
+          eta2s = fromList Seq $ Prelude.map (LA.! 1) etas
+
+      let z1Prev = computeAs P $ aOld !> 0
+          z2Prev = computeAs P $ aOld !> 1
+          z1New  = z1Prev !+! z2Prev .* deltaT !+! eta1s
+          z2New  = z2Prev !-! (computeAs P $ M.map (\x -> g * sin x * deltaT) z1Prev) !+! eta2s
+      _ <- zipWithM_ (\j x1New -> write ma (i :> j :. 0) x1New) [0 .. bigN - 1] (toList z1New)
+      _ <- zipWithM_ (\j x2New -> write ma (i :> j :. 1) x2New) [0 .. bigN - 1] (toList z2New)
+      let z3New = M.map sin z2New
+      let logW = M.zipWith (\y x -> logPdf (Normal (LA.vector [y]) bigRH) (LA.vector [x])) ys z3New
+          maxW = maximum' logW
+          wPre = M.map exp $ logW .- maxW
+          wNew = wPre ./ (M.sum wPre)
+
+      aNew <- stackSlicesM (Dim 2) [z1New, z2New]
+      pure (computeAs P aNew, computeAs P wNew)
 
 -- See https://xianblog.wordpress.com/tag/stratified-resampling/
 resample_stratified'
   :: forall g m . (PrimMonad m, StatefulGen g m, MonadReader g m) =>
-     Array P Int Double -> m (Array P Int Int)
+     Array P Ix1 Double -> m (Array P Ix1 Int)
 resample_stratified' weights = indices
 
   where
 
     bigN = elemsCount weights
 
-    cumulative_sum :: PrimMonad m => m (Array P Int Double)
+    cumulative_sum :: PrimMonad m => m (Array P Ix1 Double)
     cumulative_sum = createArrayS_ (Sz bigN) $
       (\ma -> foldM_ (f ma) 0.0 (0 ..: bigN))
       where
@@ -96,7 +131,7 @@ resample_stratified' weights = indices
           return t
 
     -- Make N subdivisions, and chose a random position within each one
-    positions :: (StatefulGen g m, PrimMonad m) => m (Array P Int Double)
+    positions :: (StatefulGen g m, PrimMonad m) => m (Array P Ix1 Double)
     positions = createArrayS_ (Sz bigN) $
       \ma -> foldlM_ (f ma) 0.0 (0 ..: bigN)
       where
@@ -106,7 +141,7 @@ resample_stratified' weights = indices
           _ <- write ma i t
           return t
 
-    indices :: (StatefulGen g m, PrimMonad m) => m (Array P Int Int)
+    indices :: (StatefulGen g m, PrimMonad m) => m (Array P Ix1 Int)
     indices = do
       ps <- positions
       cs <- cumulative_sum
@@ -121,26 +156,9 @@ resample_stratified' weights = indices
       createArrayS_ (Sz bigN) $ \ma -> foldlM_ (f ma) 0 (0 ..: bigN)
 
 
--- pf inits bigN f h y bigQ bigR nx = undefined
---   where
---      bigT = elemsCount y
---      f ma (x_pf, wn) i = undefined
---        where
---          a = resample_stratified wn
---          x_pf = undefined
 
--- FIXME: Do we want a mutable array?
-pfOneStep :: (PrimMonad m, MonadThrow m, StatefulGen g m, MonadReader g m) =>
-             Array D Ix2 Double -> Array P Int Double -> m (Array DL Ix2 Double)
-pfOneStep x_pf wn = do
-  let bigN = elemsCount wn
-  is <- resample_stratified' wn
-  let y_pf = backpermute' (Sz (2 :. bigN)) (\(i :. j) -> i :. (is!j)) x_pf
-      y1Prev = y_pf !> 0
-      y2Prev = y_pf !> 1
-      y1New  = y1Prev !+! y2Prev .* deltaT
-      y2New  = y2Prev !-! M.map (\x -> g * sin x * deltaT) y1Prev
-  stackSlicesM (Dim 2) [y1New, y2New]
+
+
 
 -- function pf(inits, N, f, h, y, Q, R, nx)
 
@@ -234,8 +252,6 @@ main :: IO ()
 main = do
   is :: Array P Ix1 Int <- MWC.create >>= runReaderT (resample_stratified' ((fromList Seq ([0.5] ++ P.replicate 5 0.1)) :: Array P Ix1 Double))
   print is
-  foo :: Array DL Ix2 Double <- MWC.create >>= runReaderT (pfOneStep (makeArray Seq (Sz (2 :. 5)) (\ (i :. j) -> 5 * fromIntegral i + fromIntegral j) :: Array D Ix2 Double) ((fromList Seq ([0.2, 0.2, 0.2, 0.2, 0.2])) :: Array P Ix1 Double))
-  print foo
   toHtmlFile "bar.hmtl" $ toVegaLite [ dat [], mark Line [], enc [] ]
   toHtmlFile "baz.html" $
     plot (600, 300) (L [pointPlot "time" "angle", linePlot "time" "horizontal displacement"]) (Cols [("time", VL.Numbers ts), ("angle", VL.Numbers ys), ("horizontal displacement", VL.Numbers xs)])
