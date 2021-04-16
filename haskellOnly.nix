@@ -12,14 +12,6 @@ let
         }) "--subpath random-fu" { }
       ))) [ ];
 
-      # random-source = self.haskell.lib.addBuildDepends (super.haskell.lib.dontHaddock (super.haskell.lib.dontCheck (
-      #   hself.callCabal2nixWithOptions "random-fu" (builtins.fetchGit {
-      #     url = "https://github.com/lehins/random-fu";
-      #     rev = "23d4390dbad60ae491b12ebd2cabb7a985302b55";
-      #     ref = "switch-to-random";
-      #   }) "--subpath random-source" { }
-      # ))) [ ];
-
       rvar = self.haskell.lib.addBuildDepends (super.haskell.lib.dontHaddock (super.haskell.lib.dontCheck (
         hself.callCabal2nixWithOptions "rvar" (builtins.fetchGit {
           url = "https://github.com/lehins/random-fu";

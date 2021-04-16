@@ -75,6 +75,23 @@ simulatedDataPrim g deltaT bigT stateGen =
       _ <- write ma (i :. 2) y
       pure (x1New, x2New, y)
 
+simulatedDataPrim' :: forall g m . (StatefulGen g m, PrimMonad m, MonadReader g m) =>
+                     Double -> Double -> Ix1 -> m (Array P Ix2 Double)
+simulatedDataPrim' g deltaT bigT =
+  createArrayS_ (Sz (bigT :. 3)) $ \ma -> foldlM_ (f ma) (0.01, 0.00, sin 0.01 + 0.0) (0 ..: bigT)
+  where
+    f :: MArray (PrimState m) P Ix2 Double -> (Double, Double, Double) -> Ix1 -> m (Double, Double, Double)
+    f ma a@(x1Prev, x2Prev, _) i = do
+      eta <- sample (Normal (LA.vector [0.0, 0.0]) bigQH)
+      let x1New = x1Prev + x2Prev * deltaT + eta LA.! 0
+          x2New = x2Prev - g * sin x1Prev * deltaT + eta LA.! 1
+      _ <- write ma (i :. 0) x1New
+      _ <- write ma (i :. 1) x2New
+      epsilon <- sample (Normal (LA.vector [0.0]) bigRH)
+      let y = sin x1New + (epsilon LA.! 0)
+      _ <- write ma (i :. 2) y
+      pure (x1New, x2New, y)
+
 -- FIXME: Also return log weights array
 -- FIXME: Maybe use just map rather than e.g. !+!
 -- FIXME: Generalise with a state update function and an observation function
@@ -155,35 +172,6 @@ resample_stratified' weights = indices
             go s
       createArrayS_ (Sz bigN) $ \ma -> foldlM_ (f ma) 0 (0 ..: bigN)
 
-
-
-
-
-
--- function pf(inits, N, f, h, y, Q, R, nx)
-
---     T = length(y)
---     log_w = zeros(T,N);
---     x_pf = zeros(nx,N,T);
---     x_pf[:,:,1] = inits;
---     wn = zeros(N);
-
---     for t = 1:T
---         if t >= 2
---             a = resample_stratified(wn);
---             x_pf[:, :, t] = hcat(f(x_pf[:, a, t-1])...) + rand(MvNormal(zeros(nx), Q), N)
---         end
---         log_w[t, :] = logpdf(MvNormal(y[t, :], R), h(x_pf[:,:,t]));
---         wn = map(x -> exp(x), log_w[t, :] .- maximum(log_w[t, :]));
---         wn = wn / sum(wn);
---     end
-
---     log_W = sum(map(log, map(x -> x / N, sum(map(exp, log_w[:, :]), dims=2))));
-
---     return(x_pf, log_w, log_W)
-
--- end
-
 ts :: [Double]
 ts = Prelude.map Prelude.fromIntegral [0 .. bigT]
 
@@ -248,6 +236,16 @@ plot (figw,figh) specGrid dataPoints =
             _   -> [VL.width figw,  VL.height figh]
     in VL.toVegaLite $ [VL.background "#f9f9f9", configure [], description, dat', spec] ++ facet
 
+inits :: Array P Ix2 Double
+inits = fromLists' Seq [Prelude.replicate bigN 0.01, Prelude.replicate bigN 0.00]
+
+test :: (MonadReader g m, MonadThrow m, StatefulGen g m, PrimMonad m) =>
+        m (Array P Ix3 Double)
+test = do
+  ys <- simulatedDataPrim' g deltaT bigT
+  let zs = computeAs P $ ys !> 0
+  pfPrim inits g deltaT bigT bigN zs
+
 main :: IO ()
 main = do
   is :: Array P Ix1 Int <- MWC.create >>= runReaderT (resample_stratified' ((fromList Seq ([0.5] ++ P.replicate 5 0.1)) :: Array P Ix1 Double))
@@ -255,4 +253,5 @@ main = do
   toHtmlFile "bar.hmtl" $ toVegaLite [ dat [], mark Line [], enc [] ]
   toHtmlFile "baz.html" $
     plot (600, 300) (L [pointPlot "time" "angle", linePlot "time" "horizontal displacement"]) (Cols [("time", VL.Numbers ts), ("angle", VL.Numbers ys), ("horizontal displacement", VL.Numbers xs)])
- 
+  zs <- MWC.create >>= runReaderT test
+  return ()
