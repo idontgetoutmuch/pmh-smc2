@@ -2,6 +2,9 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE OverloadedStrings   #-}
 
+{-# LANGUAGE QuasiQuotes       #-}
+{-# LANGUAGE TemplateHaskell   #-}
+
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
 {-# LANGUAGE TypeFamilies #-}
@@ -24,6 +27,9 @@ import qualified Prelude as P
 import           Graphics.Vega.VegaLite hiding ( sample, Normal )
 import qualified Graphics.Vega.VegaLite as VL
 import           Data.Text ( Text(..), pack )
+
+import qualified Language.R as R
+import           Language.R.QQ
 
 import Control.Monad.Reader
 import Control.Monad.ST
@@ -118,12 +124,13 @@ pfPrim inits g deltaT bigT bigN ys = do
           z2New  = z2Prev !-! (computeAs P $ M.map (\x -> g * sin x * deltaT) z1Prev) !+! eta2s
       _ <- zipWithM_ (\j x1New -> write ma (i :> j :. 0) x1New) [0 .. bigN - 1] (toList z1New)
       _ <- zipWithM_ (\j x2New -> write ma (i :> j :. 1) x2New) [0 .. bigN - 1] (toList z2New)
-      let z3New = M.map sin z2New
+      let z3New = M.map sin z1New
       let logW = M.zipWith (\y x -> logPdf (Normal (LA.vector [y]) bigRH) (LA.vector [x])) ys z3New
           maxW = maximum' logW
           wPre = M.map exp $ logW .- maxW
           wNew = wPre ./ (M.sum wPre)
 
+      -- trace (show z1New) $ return ()
       aNew <- stackSlicesM (Dim 2) [z1New, z2New]
       pure (computeAs P aNew, computeAs P wNew)
 
@@ -181,77 +188,41 @@ xs = fmap (!!0) $ toLists $
 ys = fmap (!!2) $ toLists $
      RS.runSTGen_ (mkStdGen 42) (simulatedDataPrim g deltaT bigT)
 
-enc = encoding
-      . position X [ PName "a", PmType Quantitative ]
-      . position Y [ PName "b", PmType Quantitative ]
-
-dat = dataFromColumns []
-      . dataColumn "a" (Numbers ts)
-      . dataColumn "b" (Numbers xs)
-
-linePlot :: Text -> Text -> VL.VLSpec
-linePlot xName yName =
-  let encoding = VL.encoding
-            . VL.position VL.X [VL.PName xName, VL.PmType VL.Quantitative]
-            . VL.position VL.Y [VL.PName yName, VL.PmType VL.Quantitative]
-  in VL.asSpec [VL.mark VL.Line [VL.MColor "blue"], encoding []]
-
-pointPlot :: Text -> Text -> VL.VLSpec
-pointPlot xName yName =
-  let encoding = VL.encoding
-            . VL.position VL.X [VL.PName xName, VL.PmType VL.Quantitative]
-            . VL.position VL.Y [VL.PName yName, VL.PmType VL.Quantitative]
-  in VL.asSpec [VL.mark VL.Circle [VL.MColor "red"], encoding []]
-
-
-data SpecGrid = H [[VL.VLSpec]] | V [[VL.VLSpec]] | L [VL.VLSpec] | S VL.VLSpec | F (Text, Int, VL.VLSpec)
-
-data InputData = Cols [(Text, VL.DataValues)]
-               | File FilePath
-
-plot :: (Double, Double) -> SpecGrid -> InputData -> VL.VegaLite
-plot (figw,figh) specGrid dataPoints =
-    let description = VL.description "Plot"
-        dat' = case dataPoints of
-            Cols cols -> foldl (.) (VL.dataFromColumns []) (P.map (uncurry VL.dataColumn) cols) []
-            File fp -> VL.dataFromSource (pack fp) []
-        configure = VL.configure
-            . VL.configuration (VL.Axis
-                                        [ VL.Domain False,
-                                          VL.LabelColor "#7F7F7F",
-                                          VL.LabelPadding 4,
-                                          VL.TickColor "#7F7F7F",
-                                          VL.TickSize 5.67,
-                                          VL.Grid True,
-                                          VL.GridColor "#FFFFFF"
-                                          ])
-        spec = case specGrid of
-            S s -> VL.layer [s]
-            L ls -> VL.layer ls
-            H lss -> VL.hConcat (P.map (VL.asSpec . (:[]) . VL.layer) lss)
-            V lss -> VL.vConcat (P.map (VL.asSpec . (:[]) . VL.layer) lss)
-            F (_, _, s) -> VL.specification s
-        facet = case specGrid of
-            F (field, nColumns, _) -> [VL.columns $ fromIntegral nColumns, VL.facetFlow [VL.FName field, VL.FmType VL.Nominal]]
-            _   -> [VL.width figw,  VL.height figh]
-    in VL.toVegaLite $ [VL.background "#f9f9f9", configure [], description, dat', spec] ++ facet
-
 inits :: Array P Ix2 Double
 inits = fromLists' Seq [Prelude.replicate bigN 0.01, Prelude.replicate bigN 0.00]
 
 test :: (MonadReader g m, MonadThrow m, StatefulGen g m, PrimMonad m) =>
-        m (Array P Ix3 Double)
+        m (Array P Ix2 Double, Array P Ix3 Double)
 test = do
   ys <- simulatedDataPrim' g deltaT bigT
-  let zs = computeAs P $ ys !> 0
-  pfPrim inits g deltaT bigT bigN zs
+  let zs = computeAs P $ ys !> 2
+  us <- pfPrim inits g deltaT bigT bigN zs
+  return (ys, us)
 
 main :: IO ()
 main = do
-  is :: Array P Ix1 Int <- MWC.create >>= runReaderT (resample_stratified' ((fromList Seq ([0.5] ++ P.replicate 5 0.1)) :: Array P Ix1 Double))
+  g <- MWC.create
+  is <- runReaderT (resample_stratified' (fromList Seq ([0.5] ++ P.replicate 5 0.1))) g
   print is
-  toHtmlFile "bar.hmtl" $ toVegaLite [ dat [], mark Line [], enc [] ]
-  toHtmlFile "baz.html" $
-    plot (600, 300) (L [pointPlot "time" "angle", linePlot "time" "horizontal displacement"]) (Cols [("time", VL.Numbers ts), ("angle", VL.Numbers ys), ("horizontal displacement", VL.Numbers xs)])
-  zs <- MWC.create >>= runReaderT test
+  (as, zs) <- MWC.create >>= runReaderT test
+  -- trace (show $ ((transposeOuter zs) !> 0 !> 0)) $ return ()
+  let vs = Prelude.take bigT ts
+  let us = Prelude.map (/ fromIntegral bigN) $
+           Prelude.map (\i -> M.sum $ (transposeOuter zs) !> i !> 0) $
+           Prelude.take bigT [0..]
+  let bs = Prelude.map (\i -> as !> i !> 0) $
+           Prelude.take bigT [0..]
+  let cs = Prelude.map (\i -> as !> i !> 2) $
+           Prelude.take bigT [0..]
+  R.runRegion $ do
+    [r| print(file.path(R.home("bin"), "R")) |]
+    [r| library(ggplot2) |]
+    df <- [r| data <- data.frame(vs_hs, us_hs, bs_hs) |]
+
+    p1 <- [r| ggplot(df_hs, aes(x=vs_hs)) |]
+    p2 <- [r| p1_hs + geom_line(aes(y = us_hs), color = "darkred") |]
+    p3 <- [r| p2_hs + geom_line(aes(y = bs_hs), color="steelblue") |]
+    p4 <- [r| p3_hs + geom_point(aes(y = cs_hs), color = "red") |]
+    [r| ggsave(filename="diagrams/viaR.png") |]
+    return ()
   return ()

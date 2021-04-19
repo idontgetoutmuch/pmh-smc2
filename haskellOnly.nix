@@ -1,6 +1,11 @@
 let
 
- myHaskellPackageOverlay = self: super: {
+myHaskellPackageOverlay = self: super: {
+
+  R = super.R.overrideAttrs (oldAttrs: {
+    configureFlags = [ "--without-x" ];
+  });
+
   myHaskellPackages = super.haskellPackages.override {
     overrides = hself: hsuper: rec {
 
@@ -32,6 +37,9 @@ let
       mwc-random = hself.callHackage "mwc-random" "0.15.0.1" {};
 
       random-fu-multivariate =  hsuper.random-fu-multivariate;
+
+      inline-r = super.haskell.lib.dontCheck (
+        hself.callHackage "inline-r" "0.10.4" { R = self.R; });
     };
   };
 };
@@ -42,36 +50,20 @@ in
 
 let
 
-  inherit (nixpkgs) pkgs;
-
-  f = { mkDerivation, base, hmatrix, hvega, lib, massiv, mtl, random
-      , random-fu, random-fu-multivariate, vector
-      , mwc-random
-      }:
-      mkDerivation {
-        pname = "pmh-smc2-haskell";
-        version = "0.1.0.0";
-        src = ./.;
-        isLibrary = false;
-        isExecutable = true;
-        executableHaskellDepends = [
-          base hmatrix hvega massiv mtl random random-fu random-fu-multivariate
-          vector
-          mwc-random
-        ];
-        homepage = "https://github.com/idontgetoutmuch/whatever";
-        description = "Whatever";
-        license = lib.licenses.bsd3;
-      };
-
-  haskellPackages = if compiler == "default"
-                       then pkgs.myHaskellPackages
-                       else pkgs.myHaskell.packages.${compiler};
-
-  variant = if doBenchmark then pkgs.haskell.lib.doBenchmark else pkgs.lib.id;
-
-  drv = variant (haskellPackages.callPackage f {});
+  haskellDeps = ps: with ps; [
+    base hmatrix hvega massiv mtl random random-fu random-fu-multivariate
+    vector
+    mwc-random
+    inline-r
+  ];
 
 in
 
-  if pkgs.lib.inNixShell then drv.env else drv
+  nixpkgs.stdenv.mkDerivation {
+  name = "env";
+  buildInputs = with nixpkgs.rPackages; [
+    (nixpkgs.myHaskellPackages.ghcWithPackages haskellDeps)
+    nixpkgs.R
+    ggplot2
+  ];
+  }
