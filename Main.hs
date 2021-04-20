@@ -1,43 +1,37 @@
-{-# LANGUAGE FlexibleContexts    #-}
-{-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE OverloadedStrings   #-}
+{-# LANGUAGE FlexibleContexts      #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE OverloadedStrings     #-}
 
-{-# LANGUAGE QuasiQuotes       #-}
-{-# LANGUAGE TemplateHaskell   #-}
+{-# LANGUAGE QuasiQuotes           #-}
+{-# LANGUAGE TemplateHaskell       #-}
 
-{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleInstances     #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeFamilies          #-}
+
+{-# OPTIONS_GHC -Wall              #-}
+{-# OPTIONS_GHC -Wno-type-defaults #-}
 
 import           Data.Massiv.Array hiding ( S, L )
 import qualified Data.Massiv.Array as M
 import           Data.Random hiding ( Normal )
-import qualified Data.Random as R
 import           System.Random hiding ( uniform )
-import qualified Data.Vector as V
-import           Data.IORef
 import qualified System.Random.Stateful as RS
 import           Data.Random.Distribution.MultivariateNormal
 import qualified Numeric.LinearAlgebra.HMatrix as LA
-import           Numeric.LinearAlgebra.HMatrix ( (><), Herm )
+import           Numeric.LinearAlgebra.HMatrix ( (><) )
 import           Control.Monad.State
-import qualified Control.Monad.State.Strict as SS
 import           Prelude hiding ( read )
 import qualified Prelude as P
-import           Graphics.Vega.VegaLite hiding ( sample, Normal )
-import qualified Graphics.Vega.VegaLite as VL
-import           Data.Text ( Text(..), pack )
 
 import qualified Language.R as R
 import           Language.R.QQ
 
 import Control.Monad.Reader
-import Control.Monad.ST
 import Debug.Trace
 import qualified System.Random.MWC as MWC
-import Control.Monad.Primitive
 
-
+bigT, bigN :: Int
 bigT = 500
 bigN = 50
 
@@ -45,10 +39,12 @@ g, deltaT :: Double
 deltaT = 0.01
 g  = 9.81
 
+qc1 :: Double
 qc1 = 0.0001
 
+bigQL :: [[Double]]
 bigQL = [[qc1 * deltaT^3 / 3, qc1 * deltaT^2 / 2],
-         [qc1 * deltaT^2 / 2,       qc1 * deltaT]]
+         [qc1 * deltaT^2/ 2,  qc1 * deltaT      ]]
 
 bigQ :: Array U Ix2 Double
 bigQ = fromLists' Par bigQL
@@ -56,6 +52,7 @@ bigQ = fromLists' Par bigQL
 bigQH :: LA.Herm Double
 bigQH = LA.sym $ (2 >< 2) (concat bigQL)
 
+bigRL :: [[Double]]
 bigRL = [[0.0001]]
 
 bigR :: Array U Ix2 Double
@@ -193,15 +190,15 @@ inits = fromLists' Seq [Prelude.replicate bigN 0.01, Prelude.replicate bigN 0.00
 test :: (MonadReader g m, MonadThrow m, StatefulGen g m, PrimMonad m) =>
         m (Array P Ix2 Double, Array P Ix3 Double)
 test = do
-  ys <- simulatedDataPrim' g deltaT bigT
-  let zs = computeAs P $ (transpose ys) !> 2
+  ds <- simulatedDataPrim' g deltaT bigT
+  let zs = computeAs P $ (transpose ds) !> 2
   us <- pfPrim inits g deltaT bigT bigN zs
-  return (ys, us)
+  return (ds, us)
 
 main :: IO ()
 main = do
-  g <- MWC.create
-  is <- runReaderT (resample_stratified (fromList Seq ([0.5] ++ P.replicate 5 0.1))) g
+  h <- MWC.create
+  is <- runReaderT (resample_stratified (fromList Seq ([0.5] ++ P.replicate 5 0.1))) h
   print is
   (as, zs) <- MWC.create >>= runReaderT test
   let vs = Prelude.take bigT ts
@@ -213,14 +210,14 @@ main = do
   let cs = Prelude.map (\i -> as !> i !> 2) $
            Prelude.take bigT [0..]
   R.runRegion $ do
-    [r| print(file.path(R.home("bin"), "R")) |]
-    [r| library(ggplot2) |]
+    _ <- [r| print(file.path(R.home("bin"), "R")) |]
+    _ <- [r| library(ggplot2) |]
     df <- [r| data <- data.frame(vs_hs, us_hs, bs_hs) |]
 
     p1 <- [r| ggplot(df_hs, aes(x=vs_hs)) |]
     p2 <- [r| p1_hs + geom_line(aes(y = us_hs), color = "darkred") |]
     p3 <- [r| p2_hs + geom_line(aes(y = bs_hs), color="steelblue") |]
-    p4 <- [r| p3_hs + geom_point(aes(y = cs_hs), color = "red") |]
-    [r| ggsave(filename="diagrams/viaR.png") |]
+    _  <- [r| p3_hs + geom_point(aes(y = cs_hs), color = "red") |]
+    _  <- [r| ggsave(filename="diagrams/viaR.png") |]
     return ()
   return ()
