@@ -130,6 +130,55 @@ pfPrim inits g deltaT bigT bigN ys = do
       aNew <- stackSlicesM (Dim 2) [z1New, z2New]
       pure (computeAs P aNew, computeAs P wNew, i + 1)
 
+-- function pmh(inits, K, N, n_th, y, f_g, g, nx, prior_sample, prior_pdf, Q, R)
+
+--     T = length(y);
+--     theta = zeros(n_th, K+1);
+--     log_W = -Inf;
+--     # FIXME:
+--     x_pfs = zeros(nx, N, T, K);
+
+--     while log_W == -Inf # Find an initial sample without numerical problems
+--         theta[:, 1] = 9 .+ prior_sample(1);
+--         # FIXME:
+--         log_W = pf(inits, N, (x) -> f_g(x, theta[:, 1][1]), g, y, Q, R, nx)[3];
+--     end
+
+--     for k = 1:K
+--         theta_prop = map(exp, map(log, theta[:, k]) + 0.1 * rand(MvNormal(zeros(n_th), 1), 1)[1, :]);
+--         # log_W_prop = pf(inits, N, (x) -> f_g(x, theta_prop[1]), g, y, Q, R, nx)[3];
+--         (a, b, c) = pf(inits, N, (x) -> f_g(x, theta_prop[1]), g, y, Q, R, nx);
+--         log_W_prop = c;
+--         x_pfs[:, :, :, k] = a;
+--         mh_ratio = exp(log_W_prop - log_W) * prior_pdf(theta_prop) / prior_pdf(theta[:,k]);
+
+--         # display([theta[:, k], theta_prop, log_W, log_W_prop, mh_ratio]);
+
+--         if isnan(mh_ratio)
+--             alpha = 0;
+--         else
+--             alpha = min(1,mh_ratio);
+--         end
+
+--         dm = rand();
+--         if dm < alpha
+--             theta[:, k+1] = theta_prop;
+--             log_W = log_W_prop;
+--             new = true;
+--         else
+--             theta[:, k+1] = theta[:, k];
+--             new = false;
+--         end
+
+--         # if new == true;
+--         #     display(["PMH Sampling ", k, ": Proposal accepted!"]);
+--         # else
+--         #     display(["PMH Sampling ", k, ": Proposal rejected"]);
+--         # end
+--     end
+--     return (x_pfs, theta);
+-- end
+
 -- See https://xianblog.wordpress.com/tag/stratified-resampling/
 resample_stratified
   :: forall g m . (PrimMonad m, StatefulGen g m, MonadReader g m) =>
