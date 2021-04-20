@@ -108,37 +108,36 @@ pfPrim :: forall g m . (StatefulGen g m, PrimMonad m, MonadReader g m, MonadThro
 pfPrim inits g deltaT bigT bigN ys = do
   let initWeights = fromList Seq $ Prelude.replicate bigN (1.0 / fromIntegral bigN)
   createArrayS_ (Sz (bigT :> bigN :. 2)) $
-    \ma -> foldlM_ (f ma) (inits, initWeights) (0 ..: bigT)
+    \ma -> foldlM_ (f ma) (inits, initWeights, 0) ys
   where
-    f ma (aOld, wOld) i = do
-      js <- resample_stratified' wOld
-      let z_pf = computeAs P $
-                 backpermute' (Sz (2 :. bigN)) (\(i :. j) -> i :. (js!j)) aOld
+    f ma (aOld, wOld, i) y = do
+      js <- resample_stratified wOld
+      let aPerm = computeAs P $
+                  backpermute' (Sz (2 :. bigN)) (\(i :. j) -> i :. (js!j)) aOld
       etas <- replicateM bigN $ sample (Normal (LA.vector [0.0, 0.0]) bigQH)
       let eta1s = fromList Seq $ Prelude.map (LA.! 0) etas
           eta2s = fromList Seq $ Prelude.map (LA.! 1) etas
 
-      let z1Prev = computeAs P $ aOld !> 0
-          z2Prev = computeAs P $ aOld !> 1
+      let z1Prev = computeAs P $ aPerm !> 0
+          z2Prev = computeAs P $ aPerm !> 1
           z1New  = z1Prev !+! z2Prev .* deltaT !+! eta1s
           z2New  = z2Prev !-! (computeAs P $ M.map (\x -> g * sin x * deltaT) z1Prev) !+! eta2s
       _ <- zipWithM_ (\j x1New -> write ma (i :> j :. 0) x1New) [0 .. bigN - 1] (toList z1New)
       _ <- zipWithM_ (\j x2New -> write ma (i :> j :. 1) x2New) [0 .. bigN - 1] (toList z2New)
       let z3New = M.map sin z1New
-      let logW = M.zipWith (\y x -> logPdf (Normal (LA.vector [y]) bigRH) (LA.vector [x])) ys z3New
+      let logW = M.map (\x -> logPdf (Normal (LA.vector [y]) bigRH) (LA.vector [x])) z3New
           maxW = maximum' logW
           wPre = M.map exp $ logW .- maxW
           wNew = wPre ./ (M.sum wPre)
 
-      -- trace (show z1New) $ return ()
       aNew <- stackSlicesM (Dim 2) [z1New, z2New]
-      pure (computeAs P aNew, computeAs P wNew)
+      pure (computeAs P aNew, computeAs P wNew, i + 1)
 
 -- See https://xianblog.wordpress.com/tag/stratified-resampling/
-resample_stratified'
+resample_stratified
   :: forall g m . (PrimMonad m, StatefulGen g m, MonadReader g m) =>
      Array P Ix1 Double -> m (Array P Ix1 Int)
-resample_stratified' weights = indices
+resample_stratified weights = indices
 
   where
 
@@ -195,17 +194,16 @@ test :: (MonadReader g m, MonadThrow m, StatefulGen g m, PrimMonad m) =>
         m (Array P Ix2 Double, Array P Ix3 Double)
 test = do
   ys <- simulatedDataPrim' g deltaT bigT
-  let zs = computeAs P $ ys !> 2
+  let zs = computeAs P $ (transpose ys) !> 2
   us <- pfPrim inits g deltaT bigT bigN zs
   return (ys, us)
 
 main :: IO ()
 main = do
   g <- MWC.create
-  is <- runReaderT (resample_stratified' (fromList Seq ([0.5] ++ P.replicate 5 0.1))) g
+  is <- runReaderT (resample_stratified (fromList Seq ([0.5] ++ P.replicate 5 0.1))) g
   print is
   (as, zs) <- MWC.create >>= runReaderT test
-  -- trace (show $ ((transposeOuter zs) !> 0 !> 0)) $ return ()
   let vs = Prelude.take bigT ts
   let us = Prelude.map (/ fromIntegral bigN) $
            Prelude.map (\i -> M.sum $ (transposeOuter zs) !> i !> 0) $
