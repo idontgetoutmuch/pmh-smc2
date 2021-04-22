@@ -32,8 +32,8 @@ import Debug.Trace
 import qualified System.Random.MWC as MWC
 
 bigT, bigN :: Int
-bigT = 500
-bigN = 50
+bigT = 50
+bigN = 49
 
 g, deltaT :: Double
 deltaT = 0.01
@@ -125,6 +125,8 @@ pfPrim inits g deltaT bigT bigN ys = do
       let z3New = M.map sin z1New
       let logW :: Array D Ix1 Double
           logW = M.map (\x -> logPdf (Normal (LA.vector [y]) bigRH) (LA.vector [x])) z3New
+          newLogW :: Double
+          newLogW = oldLogW + log ((/ fromIntegral bigN) $ M.sum $ M.map exp logW)
           maxW = maximum' logW
           wPre = M.map exp $ logW .- maxW
           wNew = wPre ./ (M.sum wPre)
@@ -132,64 +134,49 @@ pfPrim inits g deltaT bigT bigN ys = do
       _ <- zipWithM_ (\j lw -> write ma (i :> j :. 2) lw) [0 .. bigN - 1] (toList logW)
 
       aNew <- stackSlicesM (Dim 2) [z1New, z2New]
-      pure (computeAs P aNew, computeAs P wNew, i + 1, oldLogW)
+      pure (computeAs P aNew, computeAs P wNew, i + 1, newLogW)
 
-pmh inits bigK bigN bigT nTheta ys littleG deltaT f_g g prior_sample prior_pdf bigQ bigR = do
+priorPdf ::
+            Double -> Double
+priorPdf theta =
+  pdf (Normal (LA.vector [0.0]) (LA.sym $ (1><1) [1.0])) (LA.vector [theta])
+
+priorSample :: forall g m . (StatefulGen g m, MonadReader g m) =>
+               m (LA.Vector Double)
+priorSample = sample (Normal (LA.vector [0.0]) (LA.sym $ (1><1) [1.0]))
+
+pmh :: (MonadReader g m, StatefulGen g m, PrimMonad m, MonadThrow m) =>
+     Array P Ix2 Double
+     -> Int
+     -> Ix1
+     -> Ix1
+     -> Array P Ix1 Double
+     -> Double
+     -> m Double
+     -> (Double -> Double)
+     -> m ((Double, Double), Array P Ix4 Double)
+pmh inits bigK bigN bigT ys deltaT priorSample priorPdf = do
+  initTheta <- liftM (9.0 +) priorSample
+  ((_, _, _, initlogWeight), _) <- pfPrim inits initTheta deltaT bigT bigN ys
   createArrayS (Sz (2 :> bigN :> bigT :. bigK)) $
-    \ma -> foldlM (f ma) undefined ys
+    \ma -> foldlM (f ma) (initTheta, initlogWeight) (makeVectorR D Seq (Sz bigK) id)
   where
-    f ma oldTheta y = do
-      eta <- sample (Normal (LA.vector [0.0]) (LA.sym $ (1><1) [1.0]))
-      let theta_prop = exp (log oldTheta + 0.1 * eta)
-      _ <- pfPrim inits littleG deltaT bigT bigN ys
-      return oldTheta
+    f ma (thetaOld, logWeightOld) l = do
+      eta <- priorSample
+      let thetaProp = exp (log thetaOld + 0.1 * eta)
+      ((_, _, _, logWeightProp), particles) <- pfPrim inits thetaProp deltaT bigT bigN ys
+      Prelude.mapM_ (\(i, j, k) -> write ma (i :> j :> k :. l) (particles ! (k :> j :. i))) [(i, j, k) | i <- [1 .. 2], j <- [0 .. bigN - 1], k <- [0 .. bigT - 1]]
 
---     T = length(y);
---     theta = zeros(n_th, K+1);
---     log_W = -Inf;
---     # FIXME:
---     x_pfs = zeros(nx, N, T, K);
-
---     while log_W == -Inf # Find an initial sample without numerical problems
---         theta[:, 1] = 9 .+ prior_sample(1);
---         # FIXME:
---         log_W = pf(inits, N, (x) -> f_g(x, theta[:, 1][1]), g, y, Q, R, nx)[3];
---     end
-
---     for k = 1:K
---         theta_prop = map(exp, map(log, theta[:, k]) + 0.1 * rand(MvNormal(zeros(n_th), 1), 1)[1, :]);
---         # log_W_prop = pf(inits, N, (x) -> f_g(x, theta_prop[1]), g, y, Q, R, nx)[3];
---         (a, b, c) = pf(inits, N, (x) -> f_g(x, theta_prop[1]), g, y, Q, R, nx);
---         log_W_prop = c;
---         x_pfs[:, :, :, k] = a;
---         mh_ratio = exp(log_W_prop - log_W) * prior_pdf(theta_prop) / prior_pdf(theta[:,k]);
-
---         # display([theta[:, k], theta_prop, log_W, log_W_prop, mh_ratio]);
-
---         if isnan(mh_ratio)
---             alpha = 0;
---         else
---             alpha = min(1,mh_ratio);
---         end
-
---         dm = rand();
---         if dm < alpha
---             theta[:, k+1] = theta_prop;
---             log_W = log_W_prop;
---             new = true;
---         else
---             theta[:, k+1] = theta[:, k];
---             new = false;
---         end
-
---         # if new == true;
---         #     display(["PMH Sampling ", k, ": Proposal accepted!"]);
---         # else
---         #     display(["PMH Sampling ", k, ": Proposal rejected"]);
---         # end
---     end
---     return (x_pfs, theta);
--- end
+      let mhRatio = exp (logWeightProp - logWeightOld) * priorPdf thetaProp / priorPdf thetaOld
+          alpha = if isNaN mhRatio
+                  then 0.0
+                  else min 1.0 mhRatio
+      dm <- sample StdUniform
+      if dm < alpha
+        then trace (show thetaProp ++ " " ++ show logWeightProp) $
+             return (thetaProp, logWeightProp)
+        else trace (show thetaOld ++ " " ++ show logWeightOld) $
+             return (thetaOld,  logWeightOld)
 
 -- See https://xianblog.wordpress.com/tag/stratified-resampling/
 resample_stratified
@@ -258,29 +245,40 @@ test = do
   (_, us) <- pfPrim inits g deltaT bigT bigN zs
   return (ds, us)
 
+bigK :: Int
+bigK = 20
+
+testPmh :: forall g m . (MonadReader g m, MonadThrow m, StatefulGen g m, PrimMonad m) =>
+           m ((Double, Double), Array P Ix4 Double)
+testPmh = do
+  ds <- simulatedDataPrim' g deltaT bigT
+  let zs = computeAs P $ (transpose ds) !> 2
+  pmh inits bigK bigN bigT zs deltaT (liftM (LA.! 0) priorSample) priorPdf
+
 main :: IO ()
 main = do
   h <- MWC.create
-  is <- runReaderT (resample_stratified (fromList Seq ([0.5] ++ P.replicate 5 0.1))) h
-  print is
-  (as, zs) <- MWC.create >>= runReaderT test
-  let vs = Prelude.take bigT ts
-  let us = Prelude.map (/ fromIntegral bigN) $
-           Prelude.map (\i -> M.sum $ (transposeOuter zs) !> i !> 0) $
-           Prelude.take bigT [0..]
-  let bs = Prelude.map (\i -> as !> i !> 0) $
-           Prelude.take bigT [0..]
-  let cs = Prelude.map (\i -> as !> i !> 2) $
-           Prelude.take bigT [0..]
-  R.runRegion $ do
-    _ <- [r| print(file.path(R.home("bin"), "R")) |]
-    _ <- [r| library(ggplot2) |]
-    df <- [r| data <- data.frame(vs_hs, us_hs, bs_hs) |]
+  _ <- runReaderT testPmh h
+  -- is <- runReaderT (resample_stratified (fromList Seq ([0.5] ++ P.replicate 5 0.1))) h
+  -- print is
+  -- (as, zs) <- MWC.create >>= runReaderT test
+  -- let vs = Prelude.take bigT ts
+  -- let us = Prelude.map (/ fromIntegral bigN) $
+  --          Prelude.map (\i -> M.sum $ (transposeOuter zs) !> i !> 0) $
+  --          Prelude.take bigT [0..]
+  -- let bs = Prelude.map (\i -> as !> i !> 0) $
+  --          Prelude.take bigT [0..]
+  -- let cs = Prelude.map (\i -> as !> i !> 2) $
+  --          Prelude.take bigT [0..]
+  -- R.runRegion $ do
+  --   _ <- [r| print(file.path(R.home("bin"), "R")) |]
+  --   _ <- [r| library(ggplot2) |]
+  --   df <- [r| data <- data.frame(vs_hs, us_hs, bs_hs) |]
 
-    p1 <- [r| ggplot(df_hs, aes(x=vs_hs)) |]
-    p2 <- [r| p1_hs + geom_line(aes(y = us_hs), color = "darkred") |]
-    p3 <- [r| p2_hs + geom_line(aes(y = bs_hs), color="steelblue") |]
-    _  <- [r| p3_hs + geom_point(aes(y = cs_hs), color = "red") |]
-    _  <- [r| ggsave(filename="diagrams/viaR.png") |]
-    return ()
+  --   p1 <- [r| ggplot(df_hs, aes(x=vs_hs)) |]
+  --   p2 <- [r| p1_hs + geom_line(aes(y = us_hs), color = "darkred") |]
+  --   p3 <- [r| p2_hs + geom_line(aes(y = bs_hs), color="steelblue") |]
+  --   _  <- [r| p3_hs + geom_point(aes(y = cs_hs), color = "red") |]
+  --   _  <- [r| ggsave(filename="diagrams/viaR.png") |]
+  --   return ()
   return ()
