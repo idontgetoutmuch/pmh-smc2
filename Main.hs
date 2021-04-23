@@ -14,6 +14,7 @@
 
 import           Data.Massiv.Array hiding ( S, L )
 import qualified Data.Massiv.Array as M
+-- import           Data.Massiv.Array.Mutable
 import           Data.Random hiding ( Normal )
 import           System.Random hiding ( uniform )
 import qualified System.Random.Stateful as RS
@@ -32,8 +33,8 @@ import Debug.Trace
 import qualified System.Random.MWC as MWC
 
 bigT, bigN :: Int
-bigT = 50
-bigN = 49
+bigT = 500
+bigN = 50
 
 g, deltaT :: Double
 deltaT = 0.01
@@ -136,16 +137,18 @@ pfPrim inits g deltaT bigT bigN ys = do
       aNew <- stackSlicesM (Dim 2) [z1New, z2New]
       pure (computeAs P aNew, computeAs P wNew, i + 1, newLogW)
 
+priorMu = 9.0
+
 priorPdf ::
             Double -> Double
 priorPdf theta =
-  pdf (Normal (LA.vector [0.0]) (LA.sym $ (1><1) [1.0])) (LA.vector [theta])
+  pdf (Normal (LA.vector [priorMu]) (LA.sym $ (1><1) [1.0])) (LA.vector [theta])
 
 priorSample :: forall g m . (StatefulGen g m, MonadReader g m) =>
                m (LA.Vector Double)
 priorSample = sample (Normal (LA.vector [0.0]) (LA.sym $ (1><1) [1.0]))
 
-pmh :: (MonadReader g m, StatefulGen g m, PrimMonad m, MonadThrow m) =>
+pmh :: forall g m . (MonadReader g m, StatefulGen g m, PrimMonad m, MonadThrow m) =>
      Array P Ix2 Double
      -> Int
      -> Ix1
@@ -154,16 +157,17 @@ pmh :: (MonadReader g m, StatefulGen g m, PrimMonad m, MonadThrow m) =>
      -> Double
      -> m Double
      -> (Double -> Double)
-     -> m ((Double, Double), Array P Ix4 Double)
+     -> m ((MArray (PrimState m) P Ix1 Double, Double, Double), Array P Ix4 Double)
 pmh inits bigK bigN bigT ys deltaT priorSample priorPdf = do
-  initTheta <- liftM (9.0 +) priorSample
+  initTheta <- liftM (priorMu +) priorSample
   ((_, _, _, initlogWeight), _) <- pfPrim inits initTheta deltaT bigT bigN ys
+  initThetas <- newMArray (Sz bigK) (0.0 / 0.0)
   createArrayS (Sz (2 :> bigN :> bigT :. bigK)) $
-    \ma -> foldlM (f ma) (initTheta, initlogWeight) (makeVectorR D Seq (Sz bigK) id)
+    \ma -> foldlM (f ma) (initThetas, initTheta, initlogWeight) (makeVectorR D Seq (Sz bigK) id)
   where
-    f ma (thetaOld, logWeightOld) l = do
+    f ma (mTheta, thetaOld, logWeightOld) l = do
       eta <- priorSample
-      let thetaProp = exp (log thetaOld + 0.1 * eta)
+      let thetaProp = exp (log thetaOld + 0.05 * eta)
       ((_, _, _, logWeightProp), particles) <- pfPrim inits thetaProp deltaT bigT bigN ys
       Prelude.mapM_ (\(i, j, k) -> write ma (i :> j :> k :. l) (particles ! (k :> j :. i))) [(i, j, k) | i <- [1 .. 2], j <- [0 .. bigN - 1], k <- [0 .. bigT - 1]]
 
@@ -173,10 +177,10 @@ pmh inits bigK bigN bigT ys deltaT priorSample priorPdf = do
                   else min 1.0 mhRatio
       dm <- sample StdUniform
       if dm < alpha
-        then trace (show thetaProp ++ " " ++ show logWeightProp) $
-             return (thetaProp, logWeightProp)
-        else trace (show thetaOld ++ " " ++ show logWeightOld) $
-             return (thetaOld,  logWeightOld)
+        then do write mTheta l thetaProp
+                return $ (mTheta, thetaProp, logWeightProp)
+        else do write mTheta l thetaOld
+                return (mTheta, thetaOld,  logWeightOld)
 
 -- See https://xianblog.wordpress.com/tag/stratified-resampling/
 resample_stratified
@@ -246,10 +250,10 @@ test = do
   return (ds, us)
 
 bigK :: Int
-bigK = 20
+bigK = 1000
 
 testPmh :: forall g m . (MonadReader g m, MonadThrow m, StatefulGen g m, PrimMonad m) =>
-           m ((Double, Double), Array P Ix4 Double)
+           m ((MArray (PrimState m) P Ix1 Double, Double, Double), Array P Ix4 Double)
 testPmh = do
   ds <- simulatedDataPrim' g deltaT bigT
   let zs = computeAs P $ (transpose ds) !> 2
@@ -258,7 +262,18 @@ testPmh = do
 main :: IO ()
 main = do
   h <- MWC.create
-  _ <- runReaderT testPmh h
+  ((mb, thetaFin, logWeightFinal), ma) <- runReaderT testPmh h
+  mc <- freeze Seq mb
+  let cs = toList mc
+  let vs = Prelude.take bigT ts
+  R.runRegion $ do
+    _  <- [r| library(ggplot2) |]
+    df <- [r| data <- data.frame(cs_hs) |]
+    p1 <- [r| ggplot(data=df_hs, aes(x=cs_hs)) |]
+    _  <- [r| p1_hs + geom_histogram()         |]
+    _  <- [r| ggsave(filename="diagrams/thetaHistza.png") |]
+    return ()
+
   -- is <- runReaderT (resample_stratified (fromList Seq ([0.5] ++ P.replicate 5 0.1))) h
   -- print is
   -- (as, zs) <- MWC.create >>= runReaderT test
