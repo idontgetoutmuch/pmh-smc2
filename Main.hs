@@ -96,46 +96,60 @@ simulatedDataPrim' g deltaT bigT =
       _ <- write ma (i :. 2) y
       pure (x1New, x2New, y)
 
+stateUpdate aPerm = do
+  etas <- replicateM bigN $ sample (Normal (LA.vector [0.0, 0.0]) bigQH)
+  let eta1s = fromList Seq $ Prelude.map (LA.! 0) etas
+      eta2s = fromList Seq $ Prelude.map (LA.! 1) etas
+
+  let z1Prev = computeAs P $ aPerm !> 0
+      z2Prev = computeAs P $ aPerm !> 1
+      z1New  = z1Prev !+! z2Prev .* deltaT !+! eta1s
+      z2New  = z2Prev !-! (computeAs P $ M.map (\x -> g * sin x * deltaT) z1Prev) !+! eta2s
+  aNew <- stackSlicesM (Dim 2) [z1New, z2New]
+  return aNew
+
+measure a y = (w, logW)
+  where
+    z1 = computeAs P $ a !> 0
+    z3 = M.map sin z1
+    logW :: Array D Ix1 Double
+    logW = M.map (\x -> logPdf (Normal (LA.vector [y]) bigRH) (LA.vector [x])) z3
+    maxW = maximum' logW
+    wPre = M.map exp $ logW .- maxW
+    w = wPre ./ (M.sum wPre)
+
 -- FIXME: Maybe use just map rather than e.g. !+!
 -- FIXME: Generalise with a state update function and an observation function
 -- FIXME: Can we avoid zipWithM?
 pfPrim :: forall g m . (StatefulGen g m, PrimMonad m, MonadReader g m, MonadThrow m) =>
           Array P Ix2 Double ->
-          Double -> Double -> Ix1 -> Ix1 ->
+          Double -> Double -> Ix1 -> Ix1 -> Ix1 ->
+          (Array P Ix2 Double -> m (Array DL Ix2 Double))->
+          (Array P Ix2 Double -> Double -> (Array D Ix1 Double, Array D Ix1 Double)) ->
           Array P Ix1 Double ->
           m ((Array P Ix2 Double, Array P Ix1 Double, Int, Double), Array P Ix3 Double)
-pfPrim inits g deltaT bigT bigN ys = do
+pfPrim inits g deltaT bigT bigN bigP stateUpdate measure ys = do
   let initWeights = fromList Seq $ Prelude.replicate bigN (1.0 / fromIntegral bigN)
-  createArrayS (Sz (bigT :> bigN :. 3)) $
+  createArrayS (Sz (bigT :> bigN :. (bigP + 1))) $
     \ma -> foldlM (f ma) (inits, initWeights, 0, 0.0) ys
   where
     f ma (aOld, wOld, i, oldLogW) y = do
       js <- resample_stratified wOld
       let aPerm = computeAs P $
-                  backpermute' (Sz (2 :. bigN)) (\(i :. j) -> i :. (js!j)) aOld
-      etas <- replicateM bigN $ sample (Normal (LA.vector [0.0, 0.0]) bigQH)
-      let eta1s = fromList Seq $ Prelude.map (LA.! 0) etas
-          eta2s = fromList Seq $ Prelude.map (LA.! 1) etas
+                  backpermute' (Sz (bigP :. bigN)) (\(i :. j) -> i :. (js!j)) aOld
+      aNew <- computeAs P <$> stateUpdate aPerm
 
-      let z1Prev = computeAs P $ aPerm !> 0
-          z2Prev = computeAs P $ aPerm !> 1
-          z1New  = z1Prev !+! z2Prev .* deltaT !+! eta1s
-          z2New  = z2Prev !-! (computeAs P $ M.map (\x -> g * sin x * deltaT) z1Prev) !+! eta2s
-      _ <- zipWithM_ (\j x1New -> write ma (i :> j :. 0) x1New) [0 .. bigN - 1] (toList z1New)
-      _ <- zipWithM_ (\j x2New -> write ma (i :> j :. 1) x2New) [0 .. bigN - 1] (toList z2New)
-      let z3New = M.map sin z1New
-      let logW :: Array D Ix1 Double
-          logW = M.map (\x -> logPdf (Normal (LA.vector [y]) bigRH) (LA.vector [x])) z3New
-          newLogW :: Double
-          newLogW = oldLogW + log ((/ fromIntegral bigN) $ M.sum $ M.map exp logW)
-          maxW = maximum' logW
-          wPre = M.map exp $ logW .- maxW
-          wNew = wPre ./ (M.sum wPre)
+      M.mapM_ (\(j :. k) -> write ma (i :> j :. k) (aNew ! (j :. k))) (0 :. 0 ... (bigP - 1) :. (bigN - 1))
+
+      let (wNew', logW') = measure aNew y
+
       -- FIXME: For now store the log weights in the time / particle array (maybe forever)
-      _ <- zipWithM_ (\j lw -> write ma (i :> j :. 2) lw) [0 .. bigN - 1] (toList logW)
+      _ <- zipWithM_ (\j lw -> write ma (i :> j :. bigP) lw) [0 .. bigN - 1] (toList logW')
 
-      aNew <- stackSlicesM (Dim 2) [z1New, z2New]
-      pure (computeAs P aNew, computeAs P wNew, i + 1, newLogW)
+      let newLogW :: Double
+          newLogW = oldLogW + log ((/ fromIntegral bigN) $ M.sum $ M.map exp logW')
+
+      pure (computeAs P aNew, computeAs P wNew', i + 1, newLogW)
 
 priorMu = 9.0
 
@@ -160,7 +174,7 @@ pmh :: forall g m . (MonadReader g m, StatefulGen g m, PrimMonad m, MonadThrow m
      -> m ((MArray (PrimState m) P Ix1 Double, Double, Double), Array P Ix4 Double)
 pmh inits bigK bigN bigT ys deltaT priorSample priorPdf = do
   initTheta <- liftM (priorMu +) priorSample
-  ((_, _, _, initlogWeight), _) <- pfPrim inits initTheta deltaT bigT bigN ys
+  ((_, _, _, initlogWeight), _) <- pfPrim inits initTheta deltaT bigT bigN 2 stateUpdate measure ys
   initThetas <- newMArray (Sz bigK) (0.0 / 0.0)
   createArrayS (Sz (2 :> bigN :> bigT :. bigK)) $
     \ma -> foldlM (f ma) (initThetas, initTheta, initlogWeight) (makeVectorR D Seq (Sz bigK) id)
@@ -168,8 +182,8 @@ pmh inits bigK bigN bigT ys deltaT priorSample priorPdf = do
     f ma (mTheta, thetaOld, logWeightOld) l = do
       eta <- priorSample
       let thetaProp = exp (log thetaOld + 0.05 * eta)
-      ((_, _, _, logWeightProp), particles) <- pfPrim inits thetaProp deltaT bigT bigN ys
-      Prelude.mapM_ (\(i, j, k) -> write ma (i :> j :> k :. l) (particles ! (k :> j :. i))) [(i, j, k) | i <- [1 .. 2], j <- [0 .. bigN - 1], k <- [0 .. bigT - 1]]
+      ((_, _, _, logWeightProp), particles) <- pfPrim inits thetaProp deltaT bigT bigN 2 stateUpdate measure ys
+      Prelude.mapM_ (\(i, j, k) -> write ma (i :> j :> k :. l) (particles ! (k :> j :. i))) [(i, j, k) | i <- [0 .. 1], j <- [0 .. bigN - 1], k <- [0 .. bigT - 1]]
 
       let mhRatio = exp (logWeightProp - logWeightOld) * priorPdf thetaProp / priorPdf thetaOld
           alpha = if isNaN mhRatio
@@ -246,11 +260,11 @@ test :: (MonadReader g m, MonadThrow m, StatefulGen g m, PrimMonad m) =>
 test = do
   ds <- simulatedDataPrim' g deltaT bigT
   let zs = computeAs P $ (transpose ds) !> 2
-  (_, us) <- pfPrim inits g deltaT bigT bigN zs
+  (_, us) <- pfPrim inits g deltaT bigT bigN 2 stateUpdate measure zs
   return (ds, us)
 
 bigK :: Int
-bigK = 1000
+bigK = 100
 
 testPmh :: forall g m . (MonadReader g m, MonadThrow m, StatefulGen g m, PrimMonad m) =>
            m ((MArray (PrimState m) P Ix1 Double, Double, Double), Array P Ix4 Double)
