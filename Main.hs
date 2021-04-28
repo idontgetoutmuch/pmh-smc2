@@ -12,9 +12,14 @@
 {-# OPTIONS_GHC -Wall              #-}
 {-# OPTIONS_GHC -Wno-type-defaults #-}
 
+module Main
+  ( main
+  , ys
+  , xs
+  ) where
+
 import           Data.Massiv.Array hiding ( S, L )
 import qualified Data.Massiv.Array as M
--- import           Data.Massiv.Array.Mutable
 import           Data.Random hiding ( Normal )
 import           System.Random hiding ( uniform )
 import qualified System.Random.Stateful as RS
@@ -28,7 +33,7 @@ import qualified Prelude as P
 import qualified Language.R as R
 import           Language.R.QQ
 
-import Control.Monad.Reader
+import           Control.Monad.Reader
 import Debug.Trace
 import qualified System.Random.MWC as MWC
 
@@ -160,30 +165,33 @@ priorPdf theta =
 
 priorSample :: forall g m . (StatefulGen g m, MonadReader g m) =>
                m (LA.Vector Double)
-priorSample = sample (Normal (LA.vector [0.0]) (LA.sym $ (1><1) [1.0]))
+priorSample = sample (Normal (LA.vector [priorMu]) (LA.sym $ (1><1) [1.0]))
 
 pmh :: forall g m . (MonadReader g m, StatefulGen g m, PrimMonad m, MonadThrow m) =>
      Array P Ix2 Double
-     -> Int
-     -> Ix1
-     -> Ix1
+     -> Ix1 -> Ix1 -> Ix1 -> Ix1
      -> Array P Ix1 Double
      -> Double
      -> m Double
      -> (Double -> Double)
+     -> (Array P Ix2 Double -> m (Array DL Ix2 Double))
+     -> (Array P Ix2 Double -> Double -> (Array D Ix1 Double, Array D Ix1 Double))
      -> m ((MArray (PrimState m) P Ix1 Double, Double, Double), Array P Ix4 Double)
-pmh inits bigK bigN bigT ys deltaT priorSample priorPdf = do
-  initTheta <- liftM (priorMu +) priorSample
-  ((_, _, _, initlogWeight), _) <- pfPrim inits initTheta deltaT bigT bigN 2 stateUpdate measure ys
+pmh inits bigK bigN bigT bigP ys deltaT priorSample priorPdf stateUpdate measure = do
+  initTheta <- priorSample
+  ((_, _, _, initlogWeight), _) <- pfPrim inits initTheta deltaT bigT bigN bigP stateUpdate measure ys
   initThetas <- newMArray (Sz bigK) (0.0 / 0.0)
-  createArrayS (Sz (2 :> bigN :> bigT :. bigK)) $
+  createArrayS (Sz (bigP :> bigN :> bigT :. bigK)) $
     \ma -> foldlM (f ma) (initThetas, initTheta, initlogWeight) (makeVectorR D Seq (Sz bigK) id)
   where
     f ma (mTheta, thetaOld, logWeightOld) l = do
       eta <- priorSample
       let thetaProp = exp (log thetaOld + 0.05 * eta)
       ((_, _, _, logWeightProp), particles) <- pfPrim inits thetaProp deltaT bigT bigN 2 stateUpdate measure ys
-      Prelude.mapM_ (\(i, j, k) -> write ma (i :> j :> k :. l) (particles ! (k :> j :. i))) [(i, j, k) | i <- [0 .. 1], j <- [0 .. bigN - 1], k <- [0 .. bigT - 1]]
+      Prelude.mapM_ (\(i, j, k) -> write ma (i :> j :> k :. l) (particles ! (k :> j :. i)))
+                    [(i, j, k) | i <- [0 .. bigP - 1],
+                                 j <- [0 .. bigN - 1],
+                                 k <- [0 .. bigT - 1]]
 
       let mhRatio = exp (logWeightProp - logWeightOld) * priorPdf thetaProp / priorPdf thetaOld
           alpha = if isNaN mhRatio
@@ -195,6 +203,24 @@ pmh inits bigK bigN bigT ys deltaT priorSample priorPdf = do
                 return $ (mTheta, thetaProp, logWeightProp)
         else do write mTheta l thetaOld
                 return (mTheta, thetaOld,  logWeightOld)
+
+smc2 :: forall g m . (MonadReader g m, StatefulGen g m, PrimMonad m, MonadThrow m) =>
+     Array P Ix2 Double
+     -> Ix1 -> Ix1 -> Ix1 -> Ix1
+     -> Array P Ix1 Double
+     -> Double
+     -> m Double
+     -> (Double -> Double)
+     -> (Array P Ix2 Double -> m (Array DL Ix2 Double))
+     -> (Array P Ix2 Double -> Double -> (Array D Ix1 Double, Array D Ix1 Double))
+     -> m ((MArray (PrimState m) P Ix1 Double, Double, Double), Array P Ix4 Double)
+smc2 inits bigK bigN bigT bigP ys deltaT priorSample priorPdf stateUpdate measure = do
+  -- x_th(:,:,1) = prior_sample(N_th);
+  return undefined
+  where
+    f ma s l = do
+      return undefined
+
 
 -- See https://xianblog.wordpress.com/tag/stratified-resampling/
 resample_stratified
@@ -244,12 +270,12 @@ resample_stratified weights = indices
 ts :: [Double]
 ts = Prelude.map Prelude.fromIntegral [0 .. bigT]
 
-_xs :: [Double]
-_xs = fmap (!!0) $ toLists $
+xs :: [Double]
+xs = fmap (!!0) $ toLists $
      RS.runSTGen_ (mkStdGen 42) (simulatedDataPrim g deltaT bigT)
 
-_ys :: [Double]
-_ys = fmap (!!2) $ toLists $
+ys :: [Double]
+ys = fmap (!!2) $ toLists $
      RS.runSTGen_ (mkStdGen 42) (simulatedDataPrim g deltaT bigT)
 
 inits :: Array P Ix2 Double
@@ -271,15 +297,14 @@ testPmh :: forall g m . (MonadReader g m, MonadThrow m, StatefulGen g m, PrimMon
 testPmh = do
   ds <- simulatedDataPrim' g deltaT bigT
   let zs = computeAs P $ (transpose ds) !> 2
-  pmh inits bigK bigN bigT zs deltaT (liftM (LA.! 0) priorSample) priorPdf
+  pmh inits bigK bigN bigT 2 zs deltaT (liftM (LA.! 0) priorSample) priorPdf stateUpdate measure
 
 main :: IO ()
 main = do
   h <- MWC.create
-  ((mb, thetaFin, logWeightFinal), ma) <- runReaderT testPmh h
+  ((mb, _thetaFin, _logWeightFinal), _ma) <- runReaderT testPmh h
   mc <- freeze Seq mb
   let cs = toList mc
-  let vs = Prelude.take bigT ts
   R.runRegion $ do
     _  <- [r| library(ggplot2) |]
     df <- [r| data <- data.frame(cs_hs) |]
@@ -288,26 +313,26 @@ main = do
     _  <- [r| ggsave(filename="diagrams/thetaHistza.png") |]
     return ()
 
-  -- is <- runReaderT (resample_stratified (fromList Seq ([0.5] ++ P.replicate 5 0.1))) h
-  -- print is
-  -- (as, zs) <- MWC.create >>= runReaderT test
-  -- let vs = Prelude.take bigT ts
-  -- let us = Prelude.map (/ fromIntegral bigN) $
-  --          Prelude.map (\i -> M.sum $ (transposeOuter zs) !> i !> 0) $
-  --          Prelude.take bigT [0..]
-  -- let bs = Prelude.map (\i -> as !> i !> 0) $
-  --          Prelude.take bigT [0..]
-  -- let cs = Prelude.map (\i -> as !> i !> 2) $
-  --          Prelude.take bigT [0..]
-  -- R.runRegion $ do
-  --   _ <- [r| print(file.path(R.home("bin"), "R")) |]
-  --   _ <- [r| library(ggplot2) |]
-  --   df <- [r| data <- data.frame(vs_hs, us_hs, bs_hs) |]
+  is <- runReaderT (resample_stratified (fromList Seq ([0.5] ++ P.replicate 5 0.1))) h
+  print is
+  (as, zs) <- MWC.create >>= runReaderT test
+  let ws = Prelude.take bigT ts
+  let us = Prelude.map (/ fromIntegral bigN) $
+           Prelude.map (\i -> M.sum $ (transposeOuter zs) !> i !> 0) $
+           Prelude.take bigT [0..]
+  let bs = Prelude.map (\i -> as !> i !> 0) $
+           Prelude.take bigT [0..]
+  let ds = Prelude.map (\i -> as !> i !> 2) $
+           Prelude.take bigT [0..]
+  R.runRegion $ do
+    _ <- [r| print(file.path(R.home("bin"), "R")) |]
+    _ <- [r| library(ggplot2) |]
+    df <- [r| data <- data.frame(ws_hs, us_hs, bs_hs) |]
 
-  --   p1 <- [r| ggplot(df_hs, aes(x=vs_hs)) |]
-  --   p2 <- [r| p1_hs + geom_line(aes(y = us_hs), color = "darkred") |]
-  --   p3 <- [r| p2_hs + geom_line(aes(y = bs_hs), color="steelblue") |]
-  --   _  <- [r| p3_hs + geom_point(aes(y = cs_hs), color = "red") |]
-  --   _  <- [r| ggsave(filename="diagrams/viaR.png") |]
-  --   return ()
+    p1 <- [r| ggplot(df_hs, aes(x=ws_hs)) |]
+    p2 <- [r| p1_hs + geom_line(aes(y = us_hs), color = "darkred") |]
+    p3 <- [r| p2_hs + geom_line(aes(y = bs_hs), color="steelblue") |]
+    _  <- [r| p3_hs + geom_point(aes(y = ds_hs), color = "red") |]
+    _  <- [r| ggsave(filename="diagrams/viaR.png") |]
+    return ()
   return ()
